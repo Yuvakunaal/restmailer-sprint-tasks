@@ -1,0 +1,100 @@
+================================================================================
+TASK 1000000001666 - IMAP New-Mail Events Go Silent After Hours While The
+                     Health Endpoint Stays Green
+Domain     : Backend / API
+Stack      : Rust - tokio - bb8 (IMAP pool) - async-imap - native_db/redb -
+             poem (REST + gRPC) - Docker
+Repo       : https://github.com/rustmailer/rustmailer
+Commit     : 69a3d7b48ede67c05230f248870add928536a0c7 (v1.7.6)
+Difficulty : EXTREME
+Type       : Debugging
+Interaction: Interactive / Pairing
+================================================================================
+
+
+--------------------------------------------------------------------------------
+INITIAL PROMPT (Interactive / Pairing)
+--------------------------------------------------------------------------------
+
+This thing stops emitting new mail events after a few hours against a real IMAP acount. No errors, nothing obvius in the log, it just goes quiet and only comes back if I restart it. The annoyng part is the health endpoint stays green the whole time, so nothing tells me its happened. I only find out becuase mail stops turnign up and someone asks me about it
+
+
+--------------------------------------------------------------------------------
+HIGH-LEVEL TASK GOAL
+--------------------------------------------------------------------------------
+
+As entered in Studio:
+
+The goal of the task is to diagnose and fix a stall in which this mail service stops emitting new-mail events after several hours against a real IMAP account, recovers only on restart, and keeps its health endpoint green throughout. That last part is a symptom in its own right: the health check is not observing whatever has actually stopped. The investigation needs to reproduce the issue against a real account plus logs and connection state captured from the point where events stop. Success means the stall is reproduced and the state of the IMAP connections and the event pipeline at that point is established with evidence, explain the root cause, recovery becomes automatic so events resume without a restart, and the health signal reflects the stalled state instead of staying green. Restarting on a timer, or reconnecting on a fixed schedule without establishing the cause, is not the fix.
+
+
+--------------------------------------------------------------------------------
+MODEL A - FOLLOW-UP TURNS
+Focus: Reproduction, Evidence, Recovery, Testing
+--------------------------------------------------------------------------------
+
+Turn - 1
+Prompt:
+Before you touch anything: I keep saying "stops emitting events" but I've never actually looked at how an event gets born in this codebase. Walk me from a brand-new message arriving on the IMAP server to the point where a webhook or NATS delivery is actually queued - every function and file, in order, from this code and not from how mail clients usually work. For each hop, tell me what happens on failure: is it logged, returned up the stack, swallowed, retried? I want to know which hops are able to go quiet without leaving a trace.
+
+Turn - 2
+Prompt:
+I can't hand you a prod box that's been up for six hours and I'm not giving you my mailbox credentials. So work out what you can stand up locally that makes this process see what it would see after hours against a real server - a socket that stays open but stops answering, a connection dropped by a NAT somewhere in the middle, a login that starts failing, a FETCH that gets very slow - and then actually run rustmailer against it. Tell me which of my three symptoms (events stop, nothing in the log, only a restart brings it back) you managed to produce and which you didn't. If you produced none of them, say so plainly.
+
+Turn - 3
+Prompt:
+Now go after "nothing obvious in the log" specifically, separately from the stall itself. At the moment events stop, what should I be able to grep for? Run it and grep. If there is a line, quote it. If there isn't, show me the exact branch that returns without writing one, and tell me whether that branch is reachable for a perfectly normal, enabled account or only for something unusual.
+
+Turn - 4
+Prompt:
+A restart fixes it today. So there is something a restart throws away that nothing else in this process ever resets. Name it - specific statics, maps, pools, counters or permits, not "the connection" - and show me what each one holds in the stuck state you produced versus in a fresh process. Don't list anything you didn't actually look at. And be careful about which of these live in memory versus on disk, because that decides whether a restart could possibly be what clears them.
+
+Turn - 5
+Prompt:
+Fix it. Before you edit anything, give me the list of files you intend to change with one line on why for each, plus the nearby things you are deliberately leaving alone. Then make the change and show me the diff stat.
+
+Turn - 6
+Prompt:
+I run this under Docker with restart: always, and each instance holds a lot of customer mailboxes. Run it and show me what the container health check returns in four situations: everything fine; one mailbox with an expired password; one mailbox that is partway through a legitimately slow first sync; and the stall you reproduced. Then tell me what Docker ends up doing to every other mailbox on that instance in each of the four.
+
+Turn - 7
+Prompt:
+Run the tests for what you touched and paste the real tail of the output, including anything ignored or filtered out. Then run the wider module suite once with your change stashed and once with it applied, and tell me which failures were already there before you started. There is at least one test in the imap module that dials a real provider - did any of your runs touch the network, and what did you do about it?
+
+Turn - 8
+Prompt:
+I'm deploying this to three instances tonight. What's the worst thing your change can do to a mailbox that was working perfectly before it? Specifically: can your recovery path make me fire an email-added event twice, or skip one for mail that arrived while it was recovering? Show me from the code, not from what you intended. Then list every claim you made earlier in this session that you would now take back.
+
+
+--------------------------------------------------------------------------------
+MODEL B - FOLLOW-UP TURNS
+Focus: Existing Machinery, Concurrency Limits, Health Semantics, Calibration
+--------------------------------------------------------------------------------
+
+Turn - 1
+Prompt:
+Tell me what the container health check hits and exactly what that handler computes. Then give me an inventory of everything this process already records or exposes about whether an account is syncing - state structs, metrics, log lines, watchdogs - with file and line, who reads each one, and who would notice if it stopped updating. I want the existing machinery laid out first; nobody adds anything until I've seen it.
+
+Turn - 2
+Prompt:
+There is a runtime watchdog, a per-run sync timeout and a staleness reporter in this repo, and judging by the comments each one was added after an earlier stall. Explain why none of them caught the stall I described. Check each against the actual code path - don't tell me what it was meant to cover. If you think one of them should have caught it and doesn't work, show me why.
+
+Turn - 3
+Prompt:
+Put numbers on it. For the sync tick, the event channel and the delivery workers: what does each one wait on, what's the longest it can wait before giving up, and how much can pile up behind it without a log line? I want capacities, timeouts, intervals and worker counts, each with the file it came from. Then tell me which of those numbers, in combination, could produce a quiet window as long as the one I'm seeing.
+
+Turn - 4
+Prompt:
+Pick the one place you think it actually goes quiet and prove it with something stronger than reading. Run or instrument the code in a way that would tell your theory apart from the second most likely one, and show me the output of both. If you can't do that here, tell me what is stopping you instead of describing what you would expect to see.
+
+Turn - 5
+Prompt:
+Now change it - the smallest change you can defend. I want to know what "unhealthy" means in your version in terms of numbers that come from this repo's own defaults, and what you do about three cases: the first sync of a very large mailbox, a provider outage hitting every account at once, and a single account whose credentials were revoked. Show me the diff and tell me what you chose not to build.
+
+Turn - 6
+Prompt:
+Go back through everything you've told me in this conversation and sort it into three piles: what you confirmed by running something and seeing the output, what you confirmed by reading the exact lines, and what you inferred from how systems like this usually behave. I want the real breakdown, not a summary that makes it sound like you had it figured out from the first answer. I'm going to pick two claims and ask which pile each one went in, and one of them will be something you said about why the existing watchdogs missed this.
+
+Turn - 7
+Prompt:
+Someone has to decide on Monday whether this ships. Think about two kinds of operator: one on all the defaults, and one with short incremental intervals and a history of provider throttling. Who loses something with your change? What would you put behind a setting, what do you want logged, how does someone roll it back, and what is the one scenario you can't tell me is safe? Would you put your name on it as it stands?
